@@ -10,7 +10,7 @@ namespace RSG
     /// Implements a C# promise.
     /// https://developer.mozilla.org/en/docs/Web/JavaScript/Reference/Global_Objects/Promise
     /// </summary>
-    public interface IPromise<PromisedT>
+    public interface IPromise<PromisedT> : IDisposable
     {
         /// <summary>
         /// Gets the id of the promise, useful for referencing the promise during runtime.
@@ -171,6 +171,12 @@ namespace RSG
         /// of the promise.
         /// </summary>
         IPromise<PromisedT> Progress(Action<float> onProgress);
+        
+        /// <summary>
+        /// Add a canceled callback.
+        /// Canceled callback will be called if any of the preceding or this promise gets canceled/dismissed.
+        /// </summary>
+        IPromise<PromisedT> Canceled(Action onCanceled);
     }
 
     /// <summary>
@@ -212,7 +218,8 @@ namespace RSG
     {
         Pending,    // The promise is in-flight.
         Rejected,   // The promise has been rejected.
-        Resolved    // The promise has been resolved.
+        Resolved,   // The promise has been resolved.
+        Canceled
     };
 
     /// <summary>
@@ -264,8 +271,60 @@ namespace RSG
         /// </summary>
         public PromiseState CurState { get; private set; }
 
+        #region Cancellation
+        
+        private Action onPromiseCanceled;
+        
+        protected CancelToken _cancelToken;
+
+        public void Dispose()
+        {
+            _cancelToken.Cancel();
+        }
+
+        public IPromise<PromisedT> SetCancelToken(CancelToken cancelToken)
+        {
+            if (_cancelToken != null)
+            {
+                _cancelToken.onCanceled -= OnCancelTokenCanceled;
+            }
+            
+            _cancelToken = cancelToken;
+            _cancelToken.onCanceled += OnCancelTokenCanceled;
+            return this;
+        }
+
+        private void OnCancelTokenCanceled()
+        {
+            if (CurState != PromiseState.Pending) return;
+            
+            CurState = PromiseState.Canceled;
+            ClearHandlers();
+
+            if (Promise.EnablePromiseTracking)
+            {
+                Promise.PendingPromises.Remove(this);
+            }
+
+            try
+            {
+                onPromiseCanceled?.Invoke();
+            }
+            finally
+            {
+                onPromiseCanceled = null;
+            }
+        
+            _cancelToken.onCanceled -= OnCancelTokenCanceled;
+            _cancelToken = null;
+        }
+        
+        #endregion
+        
         public Promise()
         {
+            SetCancelToken(new CancelToken());
+            
             this.CurState = PromiseState.Pending;
             this.id = Promise.NextId();
 
@@ -275,8 +334,10 @@ namespace RSG
             }
         }
 
-        public Promise(Action<Action<PromisedT>, Action<Exception>> resolver)
+        public Promise(Action<Action<PromisedT>, Action<Exception>, Action<float>> resolver)
         {
+            SetCancelToken(new CancelToken());
+            
             this.CurState = PromiseState.Pending;
             this.id = Promise.NextId();
 
@@ -287,7 +348,7 @@ namespace RSG
 
             try
             {
-                resolver(Resolve, Reject);
+                resolver(Resolve, Reject, ReportProgress);
             }
             catch (Exception ex)
             {
@@ -297,6 +358,7 @@ namespace RSG
 
         private Promise(PromiseState initialState)
         {
+            SetCancelToken(new CancelToken());
             CurState = initialState;
             id = Promise.NextId();
         }
@@ -425,7 +487,7 @@ namespace RSG
         {
 //            Argument.NotNull(() => ex);
 
-            if (CurState != PromiseState.Pending)
+            if (CurState != PromiseState.Pending && CurState != PromiseState.Canceled)
             {
                 throw new PromiseStateException(
                     "Attempt to reject a promise that is already in state: " + CurState 
@@ -435,7 +497,8 @@ namespace RSG
             }
 
             rejectionException = ex;
-            CurState = PromiseState.Rejected;
+            if (CurState != PromiseState.Canceled)
+                CurState = PromiseState.Rejected;
 
             if (Promise.EnablePromiseTracking)
             {
@@ -450,7 +513,7 @@ namespace RSG
         /// </summary>
         public void Resolve(PromisedT value)
         {
-            if (CurState != PromiseState.Pending)
+            if (CurState != PromiseState.Pending && CurState != PromiseState.Canceled)
             {
                 throw new PromiseStateException(
                     "Attempt to resolve a promise that is already in state: " + CurState 
@@ -460,7 +523,8 @@ namespace RSG
             }
 
             resolveValue = value;
-            CurState = PromiseState.Resolved;
+            if (CurState != PromiseState.Canceled)
+                CurState = PromiseState.Resolved;
 
             if (Promise.EnablePromiseTracking)
             {
@@ -542,11 +606,13 @@ namespace RSG
         {
             if (CurState == PromiseState.Resolved)
             {
-                return Promise.Resolved();
+                return Promise.Resolved()
+                    .SetCancelToken(_cancelToken);
             }
 
             var resultPromise = new Promise();
             resultPromise.WithName(Name);
+            resultPromise.SetCancelToken(_cancelToken);
 
             Action<PromisedT> resolveHandler = _ => resultPromise.Resolve();
 
@@ -581,6 +647,7 @@ namespace RSG
 
             var resultPromise = new Promise<PromisedT>();
             resultPromise.WithName(Name);
+            resultPromise.SetCancelToken(_cancelToken);
 
             Action<PromisedT> resolveHandler = v => resultPromise.Resolve(v);
 
@@ -670,11 +737,13 @@ namespace RSG
             {
                 try
                 {
-                    return onResolved(resolveValue);
+                    return onResolved(resolveValue)
+                        .SetCancelToken(this._cancelToken);
                 }
                 catch (Exception ex)
                 {
-                    return Promise<ConvertedT>.Rejected(ex);
+                    return Promise<ConvertedT>.Rejected(ex)
+                        .SetCancelToken(_cancelToken);
                 }
             }
 
@@ -684,10 +753,12 @@ namespace RSG
 
             var resultPromise = new Promise<ConvertedT>();
             resultPromise.WithName(Name);
+            resultPromise.SetCancelToken(_cancelToken);
 
             Action<PromisedT> resolveHandler = v =>
             {
                 onResolved(v)
+                    .SetCancelToken(_cancelToken)
                     .Progress(progress => resultPromise.ReportProgress(progress))
                     .Then(
                         // Should not be necessary to specify the arg type on the next line, but Unity (mono) has an internal compiler error otherwise.
@@ -707,6 +778,7 @@ namespace RSG
                 try
                 {
                     onRejected(ex)
+                        .SetCancelToken(_cancelToken)
                         .Then(
                             chainedValue => resultPromise.Resolve(chainedValue),
                             callbackEx => resultPromise.Reject(callbackEx)
@@ -737,22 +809,26 @@ namespace RSG
             {
                 try
                 {
-                    return onResolved(resolveValue);
+                    return onResolved(resolveValue)
+                        .SetCancelToken(_cancelToken);
                 }
                 catch (Exception ex)
                 {
-                    return Promise.Rejected(ex);
+                    return Promise.Rejected(ex)
+                        .SetCancelToken(_cancelToken);
                 }
             }
 
             var resultPromise = new Promise();
             resultPromise.WithName(Name);
+            resultPromise.SetCancelToken(_cancelToken);
 
             Action<PromisedT> resolveHandler = v =>
             {
                 if (onResolved != null)
                 {
                     onResolved(v)
+                        .SetCancelToken(_cancelToken)
                         .Progress(progress => resultPromise.ReportProgress(progress))
                         .Then(
                             () => resultPromise.Resolve(),
@@ -798,16 +874,19 @@ namespace RSG
                 try
                 {
                     onResolved(resolveValue);
-                    return Promise.Resolved();
+                    return Promise.Resolved()
+                        .SetCancelToken(_cancelToken);
                 }
                 catch (Exception ex)
                 {
-                    return Promise.Rejected(ex);
+                    return Promise.Rejected(ex)
+                        .SetCancelToken(_cancelToken);
                 }
             }
 
             var resultPromise = new Promise();
             resultPromise.WithName(Name);
+            resultPromise.SetCancelToken(_cancelToken);
 
             Action<PromisedT> resolveHandler = v =>
             {
@@ -849,7 +928,7 @@ namespace RSG
         public IPromise<ConvertedT> Then<ConvertedT>(Func<PromisedT, ConvertedT> transform)
         {
 //            Argument.NotNull(() => transform);
-            return Then(value => Promise<ConvertedT>.Resolved(transform(value)));
+            return Then(value => Promise<ConvertedT>.Resolved(transform(value)).SetCancelToken(_cancelToken));
         }
 
         /// <summary>
@@ -989,10 +1068,11 @@ namespace RSG
             var progress = new float[remainingCount];
             var resultPromise = new Promise<IEnumerable<PromisedT>>();
             resultPromise.WithName("All");
-
+            
             promisesArray.Each((promise, index) =>
             {
                 promise
+                    .SetCancelToken(resultPromise._cancelToken)
                     .Progress(v =>
                     {
                         progress[index] = v;
@@ -1079,6 +1159,7 @@ namespace RSG
             promisesArray.Each((promise, index) =>
             {
                 promise
+                    .SetCancelToken(resultPromise._cancelToken)
                     .Progress(v =>
                     {
                         if (resultPromise.CurState == PromiseState.Pending)
@@ -1147,6 +1228,7 @@ namespace RSG
 
             var promise = new Promise<PromisedT>();
             promise.WithName(Name);
+            promise.SetCancelToken(_cancelToken);
 
             this.Then((Action<PromisedT>)promise.Resolve);
             this.Catch(e => {
@@ -1169,6 +1251,7 @@ namespace RSG
         {
             var promise = new Promise();
             promise.WithName(Name);
+            promise.SetCancelToken(_cancelToken);
 
             this.Then(x => promise.Resolve());
             this.Catch(e => promise.Resolve());
@@ -1180,7 +1263,8 @@ namespace RSG
         {
             var promise = new Promise();
             promise.WithName(Name);
-
+            promise.SetCancelToken(_cancelToken);
+            
             this.Then(x => promise.Resolve());
             this.Catch(e => promise.Resolve());
 
@@ -1193,6 +1277,12 @@ namespace RSG
             {
                 ProgressHandlers(this, onProgress);
             }
+            return this;
+        }
+
+        public IPromise<PromisedT> Canceled(Action onCanceled)
+        {
+            onPromiseCanceled += onCanceled;
             return this;
         }
     }
