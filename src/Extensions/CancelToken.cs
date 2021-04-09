@@ -2,20 +2,26 @@ using System;
 
 namespace RSG
 {
-    public class CancelToken
+    public class CancelToken : IDisposable
     {
         public event Action onCanceled;
-    
-        public void Cancel()
+
+        private bool _isCanceled = false;
+        public bool IsCanceled => _isCanceled;
+
+        public void Dispose()
         {
+            if (_isCanceled) return;
+            _isCanceled = true;
+
             try
             {
                 onCanceled?.Invoke();
             }
             finally
             {
-                onCanceled = null;    
-            } 
+                onCanceled = null;
+            }
         }
     }
 }

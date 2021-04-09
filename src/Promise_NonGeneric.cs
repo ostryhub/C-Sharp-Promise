@@ -163,7 +163,12 @@ namespace RSG
         /// Add a canceled callback.
         /// Canceled callback will be called if any of the preceding or this promise gets canceled/dismissed.
         /// </summary>
-        IPromise Canceled(Action onCanceled);
+        IPromise Disposed(Action onDisposed);
+        
+        /// <summary>
+        /// Add a callback called no matter if promise is resolved, rejected or disposed.
+        /// </summary>
+        IPromise Whatever(Action onComplete);
     }
 
     /// <summary>
@@ -272,6 +277,18 @@ namespace RSG
             remove { unhandlerException -= value; }
         }
         private static EventHandler<ExceptionEventArgs> unhandlerException;
+        
+        /// <summary>
+        /// Event raised for all errors.
+        /// Use this for debugging to see all promise errors, even the ones that are already handled by Catch() statements.
+        /// For this to work you need to define PROPAGATE_DEBUG_ERRORS define symbol
+        /// </summary>
+        public static event EventHandler<ExceptionEventArgs> DebugException
+        {
+            add { debugException += value; }
+            remove { debugException -= value; }
+        }
+        private static EventHandler<ExceptionEventArgs> debugException;
 
         /// <summary>
         /// Id for the next promise that is created.
@@ -329,15 +346,15 @@ namespace RSG
         /// </summary>
         private List<ProgressHandler> progressHandlers;
 
-        #region Cancellation
+        #region IDisposable
 
-        private Action onPromiseCanceled;
+        private Action onPromiseDisposed;
         
         protected CancelToken _cancelToken;
         
         public void Dispose()
         {
-            _cancelToken.Cancel();
+            _cancelToken.Dispose();
         }
 
         public IPromise SetCancelToken(CancelToken cancelToken)
@@ -356,7 +373,7 @@ namespace RSG
         {
             if (CurState != PromiseState.Pending) return;
             
-            CurState = PromiseState.Canceled;
+            CurState = PromiseState.Disposed;
             ClearHandlers();
             
             if (EnablePromiseTracking)
@@ -366,11 +383,11 @@ namespace RSG
             
             try
             {
-                onPromiseCanceled?.Invoke();
+                onPromiseDisposed?.Invoke();
             }
             finally
             {
-                onPromiseCanceled = null;
+                onPromiseDisposed = null;
             }
         
             _cancelToken.onCanceled -= OnCancelTokenCanceled;
@@ -563,6 +580,10 @@ namespace RSG
         {
 //            Argument.NotNull(() => ex);
 
+#if PROPAGATE_DEBUG_ERRORS
+            PropagateDebugException(this, ex);
+#endif
+
             if (rejectHandlers != null)
             {
                 for (int i = 0, maxI = rejectHandlers.Count; i < maxI; ++i)
@@ -605,7 +626,7 @@ namespace RSG
         {
 //            Argument.NotNull(() => ex);
 
-            if (CurState != PromiseState.Pending && CurState != PromiseState.Canceled)
+            if (CurState != PromiseState.Pending && CurState != PromiseState.Disposed)
             {
                 throw new PromiseStateException(
                     "Attempt to reject a promise that is already in state: " + CurState 
@@ -615,7 +636,7 @@ namespace RSG
             }
 
             rejectionException = ex;
-            if (CurState != PromiseState.Canceled)
+            if (CurState != PromiseState.Disposed)
                 CurState = PromiseState.Rejected;
 
             if (EnablePromiseTracking)
@@ -632,7 +653,7 @@ namespace RSG
         /// </summary>
         public void Resolve()
         {
-            if (CurState != PromiseState.Pending && CurState != PromiseState.Canceled)
+            if (CurState != PromiseState.Pending && CurState != PromiseState.Disposed)
             {
                 throw new PromiseStateException(
                     "Attempt to resolve a promise that is already in state: " + CurState 
@@ -641,7 +662,7 @@ namespace RSG
                 );
             }
 
-            if (CurState != PromiseState.Canceled)
+            if (CurState != PromiseState.Disposed)
                 CurState = PromiseState.Resolved;
 
             if (EnablePromiseTracking)
@@ -658,7 +679,7 @@ namespace RSG
         /// </summary>
         public void ReportProgress(float progress)
         {
-            if (CurState != PromiseState.Pending && CurState != PromiseState.Canceled)
+            if (CurState != PromiseState.Pending && CurState != PromiseState.Disposed)
             {
                 throw new PromiseStateException(
                     "Attempt to report progress on a promise that is already in state: " 
@@ -1313,6 +1334,7 @@ namespace RSG
         {
             var promise = new Promise();
             promise.WithName(Name);
+            promise.SetCancelToken(_cancelToken);
 
             this.Then((Action)promise.Resolve);
             this.Catch(e => promise.Resolve());
@@ -1341,10 +1363,17 @@ namespace RSG
             return this;
         }
 
-        public IPromise Canceled(Action onCanceled)
+        public IPromise Disposed(Action onDisposed)
         {
-            onPromiseCanceled += onCanceled;
+            onPromiseDisposed += onDisposed;
             return this;
+        }
+
+        public IPromise Whatever(Action onComplete)
+        {
+            return this
+                .Disposed(onComplete)
+                .Finally(onComplete);
         }
 
         /// <summary>
@@ -1355,6 +1384,14 @@ namespace RSG
             if (unhandlerException != null)
             {
                 unhandlerException(sender, new ExceptionEventArgs(ex));
+            }
+        }
+        
+        internal static void PropagateDebugException(object sender, Exception ex)
+        {
+            if (debugException != null)
+            {
+                debugException(sender, new ExceptionEventArgs(ex));
             }
         }
     }

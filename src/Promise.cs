@@ -176,7 +176,12 @@ namespace RSG
         /// Add a canceled callback.
         /// Canceled callback will be called if any of the preceding or this promise gets canceled/dismissed.
         /// </summary>
-        IPromise<PromisedT> Canceled(Action onCanceled);
+        IPromise<PromisedT> Disposed(Action onDisposed);
+        
+        /// <summary>
+        /// Add a callback called no matter if promise is resolved, rejected or disposed.
+        /// </summary>
+        IPromise<PromisedT> Whatever(Action onComplete);
     }
 
     /// <summary>
@@ -219,7 +224,7 @@ namespace RSG
         Pending,    // The promise is in-flight.
         Rejected,   // The promise has been rejected.
         Resolved,   // The promise has been resolved.
-        Canceled
+        Disposed    // The promise has been disposed (will never get resolved nor rejected)
     };
 
     /// <summary>
@@ -271,15 +276,15 @@ namespace RSG
         /// </summary>
         public PromiseState CurState { get; private set; }
 
-        #region Cancellation
+        #region IDisposable
         
-        private Action onPromiseCanceled;
+        private Action onPromiseDisposed;
         
         protected CancelToken _cancelToken;
-
+        
         public void Dispose()
         {
-            _cancelToken.Cancel();
+            _cancelToken.Dispose();
         }
 
         public IPromise<PromisedT> SetCancelToken(CancelToken cancelToken)
@@ -298,7 +303,7 @@ namespace RSG
         {
             if (CurState != PromiseState.Pending) return;
             
-            CurState = PromiseState.Canceled;
+            CurState = PromiseState.Disposed;
             ClearHandlers();
 
             if (Promise.EnablePromiseTracking)
@@ -308,11 +313,11 @@ namespace RSG
 
             try
             {
-                onPromiseCanceled?.Invoke();
+                onPromiseDisposed?.Invoke();
             }
             finally
             {
-                onPromiseCanceled = null;
+                onPromiseDisposed = null;
             }
         
             _cancelToken.onCanceled -= OnCancelTokenCanceled;
@@ -444,6 +449,10 @@ namespace RSG
         {
 //            Argument.NotNull(() => ex);
 
+#if PROPAGATE_DEBUG_ERRORS
+            Promise.PropagateDebugException(this, ex);
+#endif
+
             if (rejectHandlers != null)
             {
                 for (int i = 0, maxI = rejectHandlers.Count; i < maxI; ++i)
@@ -487,7 +496,7 @@ namespace RSG
         {
 //            Argument.NotNull(() => ex);
 
-            if (CurState != PromiseState.Pending && CurState != PromiseState.Canceled)
+            if (CurState != PromiseState.Pending && CurState != PromiseState.Disposed)
             {
                 throw new PromiseStateException(
                     "Attempt to reject a promise that is already in state: " + CurState 
@@ -497,7 +506,7 @@ namespace RSG
             }
 
             rejectionException = ex;
-            if (CurState != PromiseState.Canceled)
+            if (CurState != PromiseState.Disposed)
                 CurState = PromiseState.Rejected;
 
             if (Promise.EnablePromiseTracking)
@@ -513,7 +522,7 @@ namespace RSG
         /// </summary>
         public void Resolve(PromisedT value)
         {
-            if (CurState != PromiseState.Pending && CurState != PromiseState.Canceled)
+            if (CurState != PromiseState.Pending && CurState != PromiseState.Disposed)
             {
                 throw new PromiseStateException(
                     "Attempt to resolve a promise that is already in state: " + CurState 
@@ -523,7 +532,7 @@ namespace RSG
             }
 
             resolveValue = value;
-            if (CurState != PromiseState.Canceled)
+            if (CurState != PromiseState.Disposed)
                 CurState = PromiseState.Resolved;
 
             if (Promise.EnablePromiseTracking)
@@ -1280,10 +1289,17 @@ namespace RSG
             return this;
         }
 
-        public IPromise<PromisedT> Canceled(Action onCanceled)
+        public IPromise<PromisedT> Disposed(Action onDisposed)
         {
-            onPromiseCanceled += onCanceled;
+            onPromiseDisposed += onDisposed;
             return this;
+        }
+
+        public IPromise<PromisedT> Whatever(Action onComplete)
+        {
+            return this
+                .Disposed(onComplete)
+                .Finally(onComplete);
         }
     }
 }

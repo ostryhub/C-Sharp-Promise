@@ -2,7 +2,7 @@ using System;
 
 namespace RSG
 {
-    public class PromiseUtils
+    public static class PromiseUtils
     {
         public static IPromise WhileDo(Func<bool> condition, Func<IPromise> statement)
         {
@@ -25,6 +25,8 @@ namespace RSG
 
         void Loop()
         {
+            if (CurState != PromiseState.Pending) return;
+            
             if (!_condition())
             {
                 Resolve();
